@@ -27,21 +27,21 @@ echo "  $INSTALL_PATH"
 echo
 
 
-read -rp "Create an application launcher? [Y/n] " answer
+read -rp "Create a KDE application launcher? [Y/n] " answer
 
 if [[ ! "$answer" =~ ^[Nn]$ ]]; then
 	mkdir -p "$APPLICATIONS_DIR"
 
-	cat > "$DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=SteamGrid Sync
-Comment=Backup and restore SteamGrid artwork
-Exec=konsole --title "SteamGrid Sync" -e "$INSTALL_PATH"
-Icon=steam
-Terminal=false
-Categories=Utility;
-EOF
+	{
+		echo "[Desktop Entry]"
+		echo "Type=Application"
+		echo "Name=SteamGrid Sync"
+		echo "Comment=Backup and restore SteamGrid artwork"
+		printf 'Exec=konsole --title "SteamGrid Sync" -e %s\n' "$INSTALL_PATH"
+		echo "Icon=steam"
+		echo "Terminal=false"
+		echo "Categories=Utility;"
+	} > "$DESKTOP_FILE"
 
 	echo
 	echo "Launcher created:"

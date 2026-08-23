@@ -27,7 +27,7 @@ echo "  $INSTALL_PATH"
 echo
 
 
-read -rp "Create a KDE application launcher? [Y/n] " answer </dev/tty
+read -rp "Create an application launcher? [Y/n] " answer </dev/tty
 
 if [[ ! "$answer" =~ ^[Nn]$ ]]; then
 	mkdir -p "$APPLICATIONS_DIR"

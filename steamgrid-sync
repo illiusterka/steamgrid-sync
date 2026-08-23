@@ -1,0 +1,597 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+CONFIG_DIR="$HOME/.config/steamgrid-sync"
+CONFIG_FILE="$CONFIG_DIR/config"
+DEFAULT_BACKUP_DIR="$CONFIG_DIR/grid"
+APPLICATIONS_DIR="$HOME/.local/share/applications"
+DESKTOP_FILE="$APPLICATIONS_DIR/steamgrid-sync.desktop"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Colors
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+	RED=$'\033[31m'
+	GREEN=$'\033[32m'
+	YELLOW=$'\033[33m'
+	GRAY=$'\033[90m'
+	RESET=$'\033[0m'
+else
+	RED=''
+	GREEN=''
+	YELLOW=''
+	GRAY=''
+	RESET=''
+fi
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Header
+# ─────────────────────────────────────────────────────────────────────────────
+
+print_header() {
+	local section="$1"
+	local width=40
+	local title="SteamGrid Sync"
+
+	local title_padding=$((width - ${#title}))
+	local section_padding=$((width - ${#section}))
+
+	local title_left=$((title_padding / 2))
+	local title_right=$((title_padding - title_left))
+
+	local section_left=$((section_padding / 2))
+	local section_right=$((section_padding - section_left))
+
+	printf '+%*s+\n' "$width" '' | tr ' ' '-'
+	printf '|%*s%s%*s|\n' \
+		"$title_left" '' \
+		"$title" \
+		"$title_right" ''
+	printf '+%*s+\n' "$width" '' | tr ' ' '-'
+	printf '|%*s%s%*s|\n' \
+		"$section_left" '' \
+		"$section" \
+		"$section_right" ''
+	printf '+%*s+\n' "$width" '' | tr ' ' '-'
+	echo
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Find Steam grid directory
+# ─────────────────────────────────────────────────────────────────────────────
+
+find_steam_grid() {
+	local candidates=(
+		"$HOME/.steam/steam/userdata"
+		"$HOME/.local/share/Steam/userdata"
+	)
+
+	local userdata_dir
+	local grid_dir
+
+	for userdata_dir in "${candidates[@]}"; do
+		[[ -d "$userdata_dir" ]] || continue
+
+		for grid_dir in "$userdata_dir"/*/config/grid; do
+			if [[ -d "$grid_dir" ]]; then
+				echo "$grid_dir"
+				return 0
+			fi
+		done
+	done
+
+	return 1
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Load configuration
+# ─────────────────────────────────────────────────────────────────────────────
+
+load_backup_dir() {
+	BACKUP_DIR="$DEFAULT_BACKUP_DIR"
+
+	if [[ ! -f "$CONFIG_FILE" ]]; then
+		mkdir -p "$CONFIG_DIR"
+		printf '%s\n' "$DEFAULT_BACKUP_DIR" > "$CONFIG_FILE"
+		return
+	fi
+
+	local configured_dir
+	configured_dir="$(<"$CONFIG_FILE")"
+
+	if [[ -n "$configured_dir" ]]; then
+		BACKUP_DIR="$configured_dir"
+	fi
+
+	if [[ "$BACKUP_DIR" == "~/"* ]]; then
+		BACKUP_DIR="$HOME/${BACKUP_DIR#~/}"
+	fi
+}
+
+create_launcher() {
+	mkdir -p "$APPLICATIONS_DIR"
+
+	local script_path
+	script_path="$(realpath "$0")"
+
+	cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=SteamGrid Sync
+Comment=Backup and restore SteamGrid artwork
+Exec=konsole --title "SteamGrid Sync" -e "$script_path"
+Icon=steam
+Terminal=false
+Categories=Utility;
+EOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Change status symbol
+# ─────────────────────────────────────────────────────────────────────────────
+
+status_symbol() {
+	local status="$1"
+
+	case "$status" in
+		+)
+			printf '%b+%b' "$GREEN" "$RESET"
+			;;
+		-)
+			printf '%b-%b' "$RED" "$RESET"
+			;;
+		M)
+			printf '%bM%b' "$YELLOW" "$RESET"
+			;;
+		*)
+			printf ' '
+			;;
+	esac
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Show changes
+#
+# Arguments:
+#   $1 = source
+#   $2 = destination
+#   $3 = dry run
+#
+# Returns:
+#   0 if changes exist
+#   1 if already synchronized
+# ─────────────────────────────────────────────────────────────────────────────
+
+show_changes() {
+	local source="$1"
+	local destination="$2"
+	local dry_run="$3"
+
+	declare -A cover_status=()
+	declare -A logo_status=()
+	declare -A hero_status=()
+	declare -A json_status=()
+	declare -A game_ids=()
+
+	local other_deletions=()
+
+	local rsync_args=(
+		-a
+		--checksum
+		--delete
+		--out-format='%i|%n'
+	)
+
+	if [[ "$dry_run" == true ]]; then
+		rsync_args+=(--dry-run)
+	fi
+
+	while IFS='|' read -r status path; do
+		[[ -z "$path" ]] && continue
+
+		path="${path#./}"
+
+		# Directory metadata isn't useful to our table.
+		[[ "$path" == */ ]] && continue
+
+		local id=''
+		local type=''
+
+		case "$path" in
+			*_hero.*)
+				id="${path%_hero.*}"
+				type="hero"
+				;;
+			*_logo.*)
+				id="${path%_logo.*}"
+				type="logo"
+				;;
+			*.json)
+				id="${path%.json}"
+				type="json"
+				;;
+			*p.*)
+				id="${path%p.*}"
+				type="cover"
+				;;
+			*)
+				if [[ "$status" == \*deleting* ]]; then
+					other_deletions+=("$path")
+				fi
+				continue
+				;;
+		esac
+
+		# Only accept numeric Steam App IDs.
+		if [[ ! "$id" =~ ^[0-9]+$ ]]; then
+			if [[ "$status" == \*deleting* ]]; then
+				other_deletions+=("$path")
+			fi
+			continue
+		fi
+
+		local change
+
+		if [[ "$status" == \*deleting* ]]; then
+			change='-'
+		elif [[ "$status" == *+++++++++* ]]; then
+			change='+'
+		else
+			change='M'
+		fi
+
+		game_ids["$id"]=1
+
+		case "$type" in
+			cover)
+				cover_status["$id"]="$change"
+				;;
+			logo)
+				logo_status["$id"]="$change"
+				;;
+			hero)
+				hero_status["$id"]="$change"
+				;;
+			json)
+				json_status["$id"]="$change"
+				;;
+		esac
+
+	done < <(
+		rsync "${rsync_args[@]}" "$source/" "$destination/"
+	)
+
+	local game_count=0
+	local deletion_count=0
+	local id
+	local path
+
+	for id in "${!game_ids[@]}"; do
+		(( game_count += 1 ))
+	done
+
+	for path in "${other_deletions[@]}"; do
+		(( deletion_count += 1 ))
+	done
+
+	if (( game_count > 0 )); then
+		local border='+-----------+-------+------+------+------+'
+
+		echo "$border"
+		echo '| Steam ID  | Cover | Logo | Hero | JSON |'
+		echo "$border"
+
+		while IFS= read -r id; do
+			local cover="${cover_status[$id]-}"
+			local logo="${logo_status[$id]-}"
+			local hero="${hero_status[$id]-}"
+			local json="${json_status[$id]-}"
+
+			printf '| %-9s |   ' "$id"
+			status_symbol "$cover"
+			printf '   |  '
+			status_symbol "$logo"
+			printf '   |  '
+			status_symbol "$hero"
+			printf '   |  '
+			status_symbol "$json"
+			printf '   |\n'
+		done < <(printf '%s\n' "${!game_ids[@]}" | sort -n)
+
+		echo "$border"
+		echo
+		echo "$game_count game(s) affected."
+		echo
+	fi
+
+	if (( deletion_count > 0 )); then
+		echo "${RED}Other items to delete:${RESET}"
+		echo
+
+		for path in "${other_deletions[@]}"; do
+			printf '  %b-%b %s\n' "$RED" "$RESET" "$path"
+		done
+
+		echo
+		echo "${RED}WARNING: These items are not recognized${RESET}"
+		echo "${RED}SteamGrid assets and will be deleted.${RESET}"
+		echo
+	fi
+
+	if (( game_count == 0 && deletion_count == 0 )); then
+		echo "No changes."
+		echo
+		return 1
+	fi
+
+	return 0
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Help
+# ─────────────────────────────────────────────────────────────────────────────
+
+show_help() {
+	clear
+	print_header "Help"
+
+	echo "BACKUP"
+	echo "------"
+	echo "Copies Steam's grid artwork into the"
+	echo "configured backup directory."
+	echo
+	echo "RESTORE"
+	echo "-------"
+	echo "Copies the backup back into Steam."
+	echo
+	echo "CHANGE TABLE"
+	echo "------------"
+	echo "Each row represents one Steam game."
+	echo
+	echo "  +   File will be created"
+	echo "  -   File will be deleted"
+	echo "  M   File will be modified"
+	echo "      No change"
+	echo
+	echo "Columns:"
+	echo
+	echo "  Cover   <id>p.*"
+	echo "  Logo    <id>_logo.*"
+	echo "  Hero    <id>_hero.*"
+	echo "  JSON    <id>.json"
+	echo
+	echo "Unrecognized files are shown separately"
+	echo "before they can be deleted."
+	echo
+	echo "File contents are compared using checksums."
+	echo
+	echo "CONFIGURATION"
+	echo "-------------"
+	echo "Default backup:"
+	echo "  $DEFAULT_BACKUP_DIR"
+	echo
+	echo "To use another directory, edit:"
+	echo "  $CONFIG_FILE"
+	echo
+	echo "and put the backup path in it."
+	echo
+
+	read -rp "Press Enter to return to the menu..."
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backup / restore
+# ─────────────────────────────────────────────────────────────────────────────
+
+sync_grid() {
+	local restore="$1"
+
+	local steam_dir
+	steam_dir="$(find_steam_grid)" || {
+		clear
+		print_header "Error"
+
+		echo "Could not find a Steam grid directory."
+		echo
+		read -rp "Press Enter to return to the menu..."
+		return
+	}
+
+	# Backup creates its destination automatically.
+	if [[ "$restore" == false ]]; then
+		mkdir -p "$BACKUP_DIR"
+	fi
+
+	# Restore requires an existing backup.
+	if [[ "$restore" == true && ! -d "$BACKUP_DIR" ]]; then
+		clear
+		print_header "Error"
+
+		echo "Backup directory does not exist:"
+		echo "  $BACKUP_DIR"
+		echo
+		read -rp "Press Enter to return to the menu..."
+		return
+	fi
+
+	local steam_real
+	local backup_real
+
+	steam_real="$(realpath "$steam_dir")"
+	backup_real="$(realpath "$BACKUP_DIR")"
+
+	if [[ "$steam_real" == "$backup_real" ]]; then
+		clear
+		print_header "Error"
+
+		echo "Steam grid and backup are the same"
+		echo "directory."
+		echo
+		read -rp "Press Enter to return to the menu..."
+		return
+	fi
+
+	local source_dir
+	local destination_dir
+	local title
+
+	if [[ "$restore" == true ]]; then
+		source_dir="$backup_real"
+		destination_dir="$steam_real"
+		title="Restore from backup"
+	else
+		source_dir="$steam_real"
+		destination_dir="$backup_real"
+		title="Backup"
+	fi
+
+	clear
+	print_header "$title"
+
+	echo "From:"
+	echo "  $source_dir"
+	echo
+	echo "To:"
+	echo "  $destination_dir"
+	echo
+	echo "Changes:"
+	echo
+
+	if ! show_changes "$source_dir" "$destination_dir" true; then
+		read -rp "Press Enter to return to the menu..."
+		return
+	fi
+
+	if [[ "$restore" == true ]]; then
+		echo "${RED}WARNING: This will replace the Steam grid${RESET}"
+		echo "${RED}with the contents of the backup.${RESET}"
+		echo
+		read -rp "Restore this backup? [y/N] " answer
+	else
+		read -rp "Apply these changes? [y/N] " answer
+	fi
+
+	if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+		echo
+		echo "Aborted."
+		echo
+		read -rp "Press Enter to return to the menu..."
+		return
+	fi
+
+	clear
+	print_header "$title"
+
+	echo "From:"
+	echo "  $source_dir"
+	echo
+	echo "To:"
+	echo "  $destination_dir"
+	echo
+	echo "Changes:"
+	echo
+
+	show_changes "$source_dir" "$destination_dir" false || true
+
+	echo
+	if [[ "$restore" == true ]]; then
+		echo "Restore complete."
+	else
+		echo "Backup complete."
+	fi
+
+	echo
+	read -rp "Press Enter to return to the menu..."
+}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Initialize
+# ─────────────────────────────────────────────────────────────────────────────
+
+first_run() {
+	mkdir -p "$CONFIG_DIR"
+
+	printf '%s\n' "$DEFAULT_BACKUP_DIR" > "$CONFIG_FILE"
+
+	echo
+	echo "SteamGrid Sync has been initialized."
+	echo
+	echo "Backup directory:"
+	echo "  $DEFAULT_BACKUP_DIR"
+	echo
+
+	read -rp "Create an application launcher? [Y/n] " answer
+
+	if [[ ! "$answer" =~ ^[Nn]$ ]]; then
+		create_launcher
+		echo
+		echo "Launcher created:"
+		echo "  $DESKTOP_FILE"
+	fi
+
+	echo
+	read -rp "Press Enter to continue..."
+}
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+	first_run
+fi
+
+load_backup_dir
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main menu
+# ─────────────────────────────────────────────────────────────────────────────
+
+while true; do
+	clear
+	print_header "Main Menu"
+
+	echo "Backup folder:"
+	echo "  $BACKUP_DIR"
+	echo
+	echo "What do you want to do?"
+	echo
+	echo "1. Backup"
+	echo "2. Restore from backup"
+	echo "3. Help"
+	echo "4. Exit"
+	echo
+
+	read -rp "Choice: " choice
+
+	case "$choice" in
+		1)
+			sync_grid false
+			;;
+		2)
+			sync_grid true
+			;;
+		3)
+			show_help
+			;;
+		4)
+			echo "Goodbye."
+			exit 0
+			;;
+		*)
+			echo
+			echo "${YELLOW}Invalid choice.${RESET}"
+			sleep 1
+			;;
+	esac
+done

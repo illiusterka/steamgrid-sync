@@ -10,8 +10,6 @@ set -euo pipefail
 CONFIG_DIR="$HOME/.config/steamgrid-sync"
 CONFIG_FILE="$CONFIG_DIR/config"
 DEFAULT_BACKUP_DIR="$CONFIG_DIR/grid"
-APPLICATIONS_DIR="$HOME/.local/share/applications"
-DESKTOP_FILE="$APPLICATIONS_DIR/steamgrid-sync.desktop"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Colors
@@ -117,23 +115,6 @@ load_backup_dir() {
 	fi
 }
 
-create_launcher() {
-	mkdir -p "$APPLICATIONS_DIR"
-
-	local script_path
-	script_path="$(realpath "$0")"
-
-	cat > "$DESKTOP_FILE" <<EOF
-[Desktop Entry]
-Type=Application
-Name=SteamGrid Sync
-Comment=Backup and restore SteamGrid artwork
-Exec=konsole --title "SteamGrid Sync" -e "$script_path"
-Icon=steam
-Terminal=false
-Categories=Utility;
-EOF
-}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Change status symbol
@@ -530,18 +511,7 @@ first_run() {
 	echo "SteamGrid Sync has been initialized."
 	echo
 	echo "Backup directory:"
-	echo "  $DEFAULT_BACKUP_DIR"
-	echo
-
-	read -rp "Create an application launcher? [Y/n] " answer
-
-	if [[ ! "$answer" =~ ^[Nn]$ ]]; then
-		create_launcher
-		echo
-		echo "Launcher created:"
-		echo "  $DESKTOP_FILE"
-	fi
-
+	echo " $DEFAULT_BACKUP_DIR"
 	echo
 	read -rp "Press Enter to continue..."
 }
@@ -584,7 +554,6 @@ while true; do
 			show_help
 			;;
 		4)
-			echo "Goodbye."
 			exit 0
 			;;
 		*)

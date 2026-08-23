@@ -18,4 +18,4 @@ echo "Installed:"
 echo "  $INSTALL_PATH"
 echo
 
-"$INSTALL_PATH"
+"$INSTALL_PATH" </dev/tty
